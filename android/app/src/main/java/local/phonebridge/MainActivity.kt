@@ -98,68 +98,92 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("phonebridge", MODE_PRIVATE)
         val saved = prefs.getStringSet("packages", emptySet()) ?: emptySet()
 
-        // 两种来源合并：系统里的已安装应用 + 实际推送过通知的 App
-        // （小米可能不给「获取应用列表」权限，那时只能靠后者）
         val map = LinkedHashMap<String, String>()
-        var fromSystem = 0
 
-        // 1) 有启动图标的 App（只声明了 <queries> 也能拿到，最稳）
+        // 1) 有启动图标的 App：这才是用户真正认识的那批
         try {
             val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
             pm.queryIntentActivities(launcher, 0).forEach { ri ->
-                val pkg = ri.activityInfo.packageName
-                if (map.containsKey(pkg)) return@forEach
-                map[pkg] = ri.loadLabel(pm).toString()
-                fromSystem++
+                map[ri.activityInfo.packageName] = ri.loadLabel(pm).toString()
             }
         } catch (e: Exception) {
             Link.log("queryIntentActivities 失败：${e.message}")
         }
+        val launcherCount = map.size
 
-        // 2) 系统全部应用（需要 QUERY_ALL_PACKAGES）
-        try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA).forEach {
-                if (map.containsKey(it.packageName)) return@forEach
-                map[it.packageName] = pm.getApplicationLabel(it).toString()
-                fromSystem++
+        // 2) 启动图标太少时，补上系统全部应用
+        if (map.size < 10) {
+            try {
+                pm.getInstalledApplications(PackageManager.GET_META_DATA).forEach {
+                    map.putIfAbsent(it.packageName, pm.getApplicationLabel(it).toString())
+                }
+            } catch (e: Exception) {
+                Link.log("getInstalledApplications 失败：${e.message}")
             }
-        } catch (e: Exception) {
-            Link.log("getInstalledApplications 失败：${e.message}")
         }
-
-        // 3) 实际收到过通知的 App（前两者都拿不到时的兜底）
+        // 3) 兜底：收到过通知的
         val seen = prefs.getStringSet("seen", emptySet()) ?: emptySet()
-        for (pkg in seen) {
-            if (map.containsKey(pkg)) continue
-            map[pkg] = prefs.getString("label_$pkg", pkg) ?: pkg
-        }
-
+        for (pkg in seen) map.putIfAbsent(pkg, prefs.getString("label_$pkg", pkg) ?: pkg)
         map.remove(packageName)
 
         val apps = map.entries.map { it.key to it.value }.sortedBy { it.second.lowercase() }
-        Link.log("应用列表：系统 $fromSystem 个 / 收到过通知 ${seen.size} 个 / 合计 ${apps.size} 个")
+        Link.log("应用列表：启动图标 $launcherCount / 合计 ${apps.size} / 已选 ${saved.size}")
         if (apps.isEmpty()) {
             MaterialAlertDialogBuilder(this)
                 .setTitle("还没有可选的 App")
-                .setMessage("系统拒绝提供应用列表。\n\n请到「设置 → 应用设置 → PhoneBridge → 权限管理 → 获取应用列表」允许；\n或者先让手机收到几条通知再回来，这里会自动列出它们。")
-                .setPositiveButton("打开应用设置") { _, _ ->
-                    startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            android.net.Uri.parse("package:$packageName"))
-                    )
-                }
-                .setNegativeButton("知道了", null)
+                .setMessage("系统拒绝提供应用列表。\n让手机先收到几条通知再回来，这里会自动列出它们。")
+                .setPositiveButton("知道了", null)
                 .show()
             return
         }
 
-        val labels = apps.map { it.second }.toTypedArray()
-        val checked = BooleanArray(apps.size) { apps[it].first in saved }
+        // 自定义视图：搜索框 + 可多选列表（AlertDialog 的 message 和列表互斥，不能用 setMultiChoiceItems）
+        val root = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(4), dp(4), dp(4), 0)
+        }
+        val search = android.widget.EditText(this).apply {
+            hint = "搜索 App"
+            setSingleLine(true)
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        root.addView(search)
+        val list = android.widget.ListView(this)
+        root.addView(list, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT, dp(360)))
+
+        val chosen = HashSet<String>(saved)
+        var filtered = apps
+
+        fun bind() {
+            list.adapter = android.widget.ArrayAdapter(
+                this,
+                android.R.layout.simple_list_item_multiple_choice,
+                filtered.map { it.second }
+            )
+            list.choiceMode = android.widget.ListView.CHOICE_MODE_MULTIPLE
+            filtered.forEachIndexed { i, pair ->
+                list.setItemChecked(i, chosen.contains(pair.first))
+            }
+        }
+        list.setOnItemClickListener { _, _, pos, _ ->
+            val pkg = filtered[pos].first
+            if (!chosen.add(pkg)) chosen.remove(pkg)
+        }
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                val q = s?.toString()?.trim()?.lowercase().orEmpty()
+                filtered = if (q.isEmpty()) apps else apps.filter { it.second.lowercase().contains(q) }
+                bind()
+            }
+        })
+        bind()
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("只转发这些 App（${apps.size} 个）")
-            .setMessage("勾选后只转发它们；一个都不勾 = 全部转发")
-            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setTitle("只转发这些 App")
+            .setView(root)
             .setNeutralButton("全不选") { _, _ ->
                 prefs.edit().putStringSet("packages", emptySet()).apply()
                 Link.log("已清空白名单（全部转发）")
@@ -167,13 +191,17 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("取消", null)
             .setPositiveButton("保存") { _, _ ->
-                val set = apps.filterIndexed { i, _ -> checked[i] }.map { it.first }.toSet()
-                prefs.edit().putStringSet("packages", set).apply()
-                Link.log("已选择 ${set.size} 个 App" + if (set.isEmpty()) "（全部转发）" else "")
+                prefs.edit().putStringSet("packages", chosen).apply()
+                Link.log("白名单已保存：\n" + chosen.mapNotNull { pkg ->
+                    prefs.getString("label_$pkg", null) ?: apps.firstOrNull { it.first == pkg }?.second ?: pkg
+                }.sorted().joinToString("、"))
                 refresh()
             }
             .show()
     }
+
+    private fun dp(v: Int): Int =
+        resources.displayMetrics.density.let { (v * it).toInt() }
 
     private fun refresh() {
         val enabled = try {
