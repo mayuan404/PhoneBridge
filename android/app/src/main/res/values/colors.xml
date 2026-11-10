@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pb_bg">#0E1319</color>
+    <color name="pb_surface">#161D26</color>
+    <color name="pb_surface2">#1E2733</color>
+    <color name="pb_primary">#4DA3FF</color>
+    <color name="pb_on_primary">#06121F</color>
+    <color name="pb_text">#E6EDF5</color>
+    <color name="pb_muted">#8A97A6</color>
+    <color name="pb_ok">#3DDC84</color>
+    <color name="pb_warn">#FFB020</color>
+    <color name="pb_err">#FF6B6B</color>
+</resources>
