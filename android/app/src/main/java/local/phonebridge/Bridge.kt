@@ -450,6 +450,15 @@ class NotifListener : NotificationListenerService() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString()
         } catch (e: Exception) { sbn.packageName }
 
+        // 记录见过的 App：小米可能不给「应用列表」权限，白名单就靠这份记录
+        run {
+            val seen = prefs.getStringSet("seen", null)?.toMutableSet() ?: mutableSetOf()
+            if (seen.add(sbn.packageName)) {
+                prefs.edit().putStringSet("seen", seen).apply()
+            }
+            prefs.edit().putString("label_" + sbn.packageName, app).apply()
+        }
+
         Link.push(sbn.packageName, app, title, text)
     }
 }

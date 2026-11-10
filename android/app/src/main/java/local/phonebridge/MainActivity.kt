@@ -97,23 +97,52 @@ class MainActivity : AppCompatActivity() {
         val pm = packageManager
         val prefs = getSharedPreferences("phonebridge", MODE_PRIVATE)
         val saved = prefs.getStringSet("packages", emptySet()) ?: emptySet()
-        val apps = try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { it.packageName != packageName }
-                .map { it.packageName to pm.getApplicationLabel(it).toString() }
-                .sortedBy { it.second.lowercase() }
-        } catch (e: Exception) { emptyList() }
+
+        // 两种来源合并：系统里的已安装应用 + 实际推送过通知的 App
+        // （小米可能不给「获取应用列表」权限，那时只能靠后者）
+        val map = LinkedHashMap<String, String>()
+        try {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA).forEach {
+                map[it.packageName] = pm.getApplicationLabel(it).toString()
+            }
+        } catch (e: Exception) {
+            Link.log("读取应用列表失败：${e.message}")
+        }
+        val seen = prefs.getStringSet("seen", emptySet()) ?: emptySet()
+        for (pkg in seen) {
+            if (map.containsKey(pkg)) continue
+            map[pkg] = prefs.getString("label_$pkg", pkg) ?: pkg
+        }
+        map.remove(packageName)
+
+        val apps = map.entries.map { it.key to it.value }.sortedBy { it.second.lowercase() }
         if (apps.isEmpty()) {
-            Link.log("读不到应用列表，请确认已授予「获取应用列表」权限")
+            MaterialAlertDialogBuilder(this)
+                .setTitle("还没有可选的 App")
+                .setMessage("系统拒绝提供应用列表。\n\n请到「设置 → 应用设置 → PhoneBridge → 权限管理 → 获取应用列表」允许；\n或者先让手机收到几条通知再回来，这里会自动列出它们。")
+                .setPositiveButton("打开应用设置") { _, _ ->
+                    startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            android.net.Uri.parse("package:$packageName"))
+                    )
+                }
+                .setNegativeButton("知道了", null)
+                .show()
             return
         }
+
         val labels = apps.map { it.second }.toTypedArray()
         val checked = BooleanArray(apps.size) { apps[it].first in saved }
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("只转发这些 App")
-            .setMessage("不勾选 = 全部转发")
+            .setTitle("只转发这些 App（${apps.size} 个可选）")
+            .setMessage("勾选后只转发它们；一个都不勾 = 全部转发")
             .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setNeutralButton("全不选") { _, _ ->
+                prefs.edit().putStringSet("packages", emptySet()).apply()
+                Link.log("已清空白名单（全部转发）")
+                refresh()
+            }
             .setNegativeButton("取消", null)
             .setPositiveButton("保存") { _, _ ->
                 val set = apps.filterIndexed { i, _ -> checked[i] }.map { it.first }.toSet()
