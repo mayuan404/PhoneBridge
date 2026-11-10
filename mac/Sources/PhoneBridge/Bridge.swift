@@ -250,6 +250,23 @@ final class Bridge: NSObject, ObservableObject {
 
     // MARK: 收到一条通知
 
+    private var lastDataAt = Date()
+    private var watchdog: Timer?
+
+    func startWatchdog() {
+        lastDataAt = Date()
+        watchdog?.invalidate()
+        watchdog = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self, self.connected else { return }
+            // 60 秒没有任何数据：链路名存实亡，断开重扫
+            if Date().timeIntervalSince(self.lastDataAt) > 60 {
+                Dbg.log("watchdog: 60s 无数据，断开重连")
+                self.lastDataAt = Date()
+                if let p = self.peripheral { self.central?.cancelPeripheralConnection(p) }
+            }
+        }
+    }
+
     func ingest(_ json: Data) {
         guard let note = try? JSONDecoder().decode(IncomingNote.self, from: json) else {
             // 兼容：旧版手机端偶发把两条 JSON 粘在一起（"}{"），拆开逐条解析
@@ -268,6 +285,11 @@ final class Bridge: NSObject, ObservableObject {
             return
         }
         var n = note
+        lastDataAt = Date()
+        if n.pkg == "__hb" {
+            if let id = n.msgId { sendAck(id) }
+            return
+        }
         if n.code == nil { n.code = extractCode(n.title + " " + n.text) }
         DispatchQueue.main.async {
             self.notes.append(n)

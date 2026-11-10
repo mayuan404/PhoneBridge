@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Bridge.shared.onChange = { [weak self] in self?.refreshBadge() }
         Bridge.shared.start()
+        Bridge.shared.startWatchdog()
         refreshBadge()
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }

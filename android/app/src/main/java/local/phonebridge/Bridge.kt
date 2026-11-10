@@ -101,6 +101,20 @@ object Link {
 
     fun recentEvents(): List<String> = synchronized(events) { events.toList() }
 
+    private var hbStarted = false
+
+    /** 心跳：长时间没有真实通知时，也要能发现链路已死 */
+    fun startHeartbeat() {
+        if (hbStarted) return
+        hbStarted = true
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (connected) push("__hb", "heartbeat", "", "")
+                handler.postDelayed(this, 20_000)
+            }
+        }, 20_000)
+    }
+
     /** 把一条通知编码成 JSON 行发出去 */
     fun push(pkg: String, app: String, title: String, text: String) {
         val id = "${System.currentTimeMillis()}-${seq++}"
@@ -143,7 +157,8 @@ object Link {
             if (acked.contains(id)) return@postDelayed
             if (p.tries >= 3) {
                 pending.remove(id)
-                log("重发 3 次仍无回执，放弃 #$id")
+                log("重发 3 次仍无回执，放弃 #$id，重建连接")
+                dropStaleLink()
                 return@postDelayed
             }
             p.tries += 1
@@ -258,6 +273,7 @@ class BridgeService : Service() {
         Link.pairCode = getSharedPreferences("phonebridge", MODE_PRIVATE)
             .getString("pairCode", "") ?: ""
         startForegroundWithChannel()
+        Link.startHeartbeat()
         startBle()
     }
 
