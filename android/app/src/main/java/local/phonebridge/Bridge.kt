@@ -125,10 +125,22 @@ object Link {
             .put("title", title)
             .put("text", text)
             .put("time", System.currentTimeMillis() / 1000.0)
-            .toString() + "\n"
+            .toString()
         log("收到通知 pkg=$pkg title=${title.take(20)}")
-        queue.add(json)
+        val line = if (pairCode.isEmpty()) {
+            json + "\n"
+        } else {
+            val enc = Secure.encrypt(json.toByteArray(Charsets.UTF_8), pairCode)
+            if (enc == null) {
+                log("加密失败，本条丢弃")
+                return
+            }
+            enc + "\n"
+        }
+        pending[id] = Pending(line, 0)
+        queue.add(line)
         flush()
+        retryLater(id)
     }
 
     /** 发送必须串行：多条通知同时到时分片会交错，粘成一行 */

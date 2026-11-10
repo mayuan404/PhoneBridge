@@ -513,10 +513,16 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         let names = (service.characteristics ?? []).map { $0.uuid.uuidString }.joined(separator: ",")
         Dbg.log("chars=\(names) err=\(error.map { String(describing: $0) } ?? "-")")
-        for c in service.characteristics ?? [] where c.uuid == Bridge.txUUID {
-            txChar = c
-            peripheral.setNotifyValue(true, for: c)
-            Dbg.log("subscribe tx …")
+        for c in service.characteristics ?? [] {
+            if c.uuid == Bridge.rxUUID {
+                rxChar = c
+                Dbg.log("rx characteristic ready")
+            }
+            if c.uuid == Bridge.txUUID {
+                txChar = c
+                peripheral.setNotifyValue(true, for: c)
+                Dbg.log("subscribe tx …")
+            }
         }
     }
 
