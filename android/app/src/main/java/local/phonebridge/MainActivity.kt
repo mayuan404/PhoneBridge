@@ -101,21 +101,43 @@ class MainActivity : AppCompatActivity() {
         // 两种来源合并：系统里的已安装应用 + 实际推送过通知的 App
         // （小米可能不给「获取应用列表」权限，那时只能靠后者）
         val map = LinkedHashMap<String, String>()
+        var fromSystem = 0
+
+        // 1) 有启动图标的 App（只声明了 <queries> 也能拿到，最稳）
         try {
-            pm.getInstalledApplications(PackageManager.GET_META_DATA).forEach {
-                map[it.packageName] = pm.getApplicationLabel(it).toString()
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(launcher, 0).forEach { ri ->
+                val pkg = ri.activityInfo.packageName
+                if (map.containsKey(pkg)) return@forEach
+                map[pkg] = ri.loadLabel(pm).toString()
+                fromSystem++
             }
         } catch (e: Exception) {
-            Link.log("读取应用列表失败：${e.message}")
+            Link.log("queryIntentActivities 失败：${e.message}")
         }
+
+        // 2) 系统全部应用（需要 QUERY_ALL_PACKAGES）
+        try {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA).forEach {
+                if (map.containsKey(it.packageName)) return@forEach
+                map[it.packageName] = pm.getApplicationLabel(it).toString()
+                fromSystem++
+            }
+        } catch (e: Exception) {
+            Link.log("getInstalledApplications 失败：${e.message}")
+        }
+
+        // 3) 实际收到过通知的 App（前两者都拿不到时的兜底）
         val seen = prefs.getStringSet("seen", emptySet()) ?: emptySet()
         for (pkg in seen) {
             if (map.containsKey(pkg)) continue
             map[pkg] = prefs.getString("label_$pkg", pkg) ?: pkg
         }
+
         map.remove(packageName)
 
         val apps = map.entries.map { it.key to it.value }.sortedBy { it.second.lowercase() }
+        Link.log("应用列表：系统 $fromSystem 个 / 收到过通知 ${seen.size} 个 / 合计 ${apps.size} 个")
         if (apps.isEmpty()) {
             MaterialAlertDialogBuilder(this)
                 .setTitle("还没有可选的 App")
@@ -135,7 +157,7 @@ class MainActivity : AppCompatActivity() {
         val checked = BooleanArray(apps.size) { apps[it].first in saved }
 
         MaterialAlertDialogBuilder(this)
-            .setTitle("只转发这些 App（${apps.size} 个可选）")
+            .setTitle("只转发这些 App（${apps.size} 个）")
             .setMessage("勾选后只转发它们；一个都不勾 = 全部转发")
             .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
             .setNeutralButton("全不选") { _, _ ->
