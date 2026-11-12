@@ -27,7 +27,7 @@ Mac：菜单栏 App（CoreBluetooth central）──► 通知列表 / 横幅 / 
 ### Mac 端
 
 ```bash
-cd tools/PhoneBridge/mac && ./build.sh
+cd mac && ./build.sh
 # 生成并安装到 ~/Applications/PhoneBridge.app
 open ~/Applications/PhoneBridge.app
 ```
@@ -36,8 +36,8 @@ open ~/Applications/PhoneBridge.app
 
 ### 安卓端（小米 14 / HyperOS）
 
-1. 用本仓库的 GitHub Actions 构建 APK（`.github/workflows/android.yml`），
-   在 Actions 页面下载 `phonebridge-apk` 产物；
+1. 从 [Releases](https://github.com/mayuan404/PhoneBridge/releases) 下载 `PhoneBridge-0.1.0.apk`
+   （或在本仓库 Actions 页面下载 `phonebridge-apk` 产物）；
 2. 安装后打开 PhoneBridge：
    - 点「授予通知读取权限」→ 在系统列表里勾选 PhoneBridge；
    - 点「启动后台服务」；
