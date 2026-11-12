@@ -503,6 +503,24 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    /// 连接失败（例如手机端广播被停、配对信息不一致导致 133）时必须回到扫描，
+    /// 否则会停在「已断开，重连中…」再也不动。
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        Dbg.log("connect failed \(error.map { String(describing: $0) } ?? "-")")
+        connected = false
+        txChar = nil
+        rxChar = nil
+        linkName = "连接失败，重新扫描…"
+        onChange?()
+        central.cancelPeripheralConnection(peripheral)
+        self.peripheral = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            guard central.state == .poweredOn else { return }
+            Dbg.log("rescan after connect failure")
+            central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Dbg.log("services=\(peripheral.services?.count ?? -1) err=\(error.map { String(describing: $0) } ?? "-")")
         for s in peripheral.services ?? [] {

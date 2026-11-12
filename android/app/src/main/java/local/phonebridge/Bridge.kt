@@ -16,6 +16,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -87,6 +88,9 @@ object Link {
 
     private val queue = ConcurrentLinkedQueue<String>()
 
+    /** 断链时最多攒这么多条：再多就丢最旧的，避免恢复后一次性刷屏 */
+    private const val MAX_QUEUE = 50
+
     /** 最近事件，App 界面里直接显示，方便没有 adb 时排查 */
     private val events = ArrayDeque<String>()
 
@@ -109,7 +113,8 @@ object Link {
         hbStarted = true
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (connected) push("__hb", "heartbeat", "", "")
+                // 积压时不要用心跳继续污染队列
+                if (connected && queue.size < 20) push("__hb", "heartbeat", "", "")
                 handler.postDelayed(this, 20_000)
             }
         }, 20_000)
@@ -138,6 +143,11 @@ object Link {
             enc + "\n"
         }
         pending[id] = Pending(line, 0)
+        while (queue.size >= MAX_QUEUE) {
+            val dropped = queue.poll()
+            if (dropped == null) break
+            log("队列已满（$MAX_QUEUE），丢弃最旧一条")
+        }
         queue.add(line)
         flush()
         retryLater(id)
@@ -193,13 +203,15 @@ object Link {
     }
 
     private fun dropStaleLink() {
-        log("蓝牙链路疑似失效，重建连接")
+        log("蓝牙链路疑似失效，主动断开等 Mac 重连")
         connected = false
         lastAckAt = 0
         lastSendAt = 0
         val dev = central
         central = null
-        txChar = null
+        // 注意：这里**不能**清 txChar。它是 GATT 服务里的特征值，与「当前连接」无关；
+        // 清掉之后即使 Mac 重连成功，sendBle 也会一直因为 ch == null 返回 false，
+        // 表现就是「已连接但发不出去」，且只能重启 App 才能恢复。
         try { if (dev != null) server?.cancelConnection(dev) } catch (e: Exception) { }
     }
 
@@ -207,20 +219,46 @@ object Link {
         synchronized(sendLock) {
             if (linkLooksDead()) {
                 dropStaleLink()
+                scheduleFlush()
                 return
             }
             while (queue.isNotEmpty()) {
                 val line = queue.peek() ?: break
                 val viaBle = sendBle(line)
-                val ok = viaBle || sendTcp(line)
-                if (!ok) {
-                    log("发送失败：蓝牙未连接，TCP 也不可用，先攒在队列里（${queue.size}）")
+                val viaTcp = !viaBle && sendTcp(line)
+                if (!viaBle && !viaTcp) {
+                    log("发送失败：${bleStateText()}；${tcpStateText()}；队列 ${queue.size} 条，稍后重试")
+                    scheduleFlush()
                     break
                 }
-                log(if (viaBle) "已通过蓝牙发送" else "已通过 TCP 发送")
                 queue.poll()
+                log(if (viaBle) "已通过蓝牙发送（队列剩 ${queue.size}）" else "已通过 TCP 发送（队列剩 ${queue.size}）")
             }
         }
+    }
+
+    /** 失败原因：说清楚到底卡在哪一环，别再一律报「蓝牙未连接」 */
+    private fun bleStateText(): String = when {
+        server == null -> "BLE 服务未就绪"
+        txChar == null -> "BLE 特征值丢失"
+        central == null -> "BLE 无设备连接"
+        !connected -> "BLE 未连接"
+        else -> "BLE 已连接但发送被拒"
+    }
+
+    private fun tcpStateText(): String =
+        if (tcp?.isConnected == true) "TCP 已连但写入失败" else "TCP 未连接"
+
+    @Volatile private var flushScheduled = false
+
+    /** 失败后自动重试一次，而不是干等下一条通知来触发 */
+    private fun scheduleFlush(delayMs: Long = 3_000) {
+        if (flushScheduled) return
+        flushScheduled = true
+        handler.postDelayed({
+            flushScheduled = false
+            flush()
+        }, delayMs)
     }
 
     private fun sendBle(line: String): Boolean {
@@ -321,7 +359,18 @@ class BridgeService : Service() {
                 val isBonded = device?.bondState == BluetoothDevice.BOND_BONDED
                 Link.connected = newState == BluetoothGatt.STATE_CONNECTED && device != null
                 Link.central = if (newState == BluetoothGatt.STATE_CONNECTED) device else null
-                Link.log("BLE 连接状态 newState=$newState 已配对=$isBonded")
+                if (newState == BluetoothGatt.STATE_CONNECTED && Link.txChar == null) {
+                    // 兜底：特征值属于服务，理论上不该为空；万一被清掉，连上时补回来
+                    Link.txChar = holder[0]?.getService(Link.serviceUUID)?.getCharacteristic(Link.txUUID)
+                }
+                // status 很关键：133 = GATT 栈内部错误（常见于配对信息不一致），
+                // 8 = 连接超时，19 = 对端主动断开。只打 newState 会让这类问题无法定位。
+                Link.log("BLE 连接状态 newState=$newState status=$status 已配对=$isBonded")
+                if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+                    // 关键修复：不少机型（含小米/HyperOS）在建立连接后会停掉广播，
+                    // 断开时不重新广播，Mac 就永远扫不到这台手机——表现为「不会自动重连」。
+                    handler.postDelayed({ startAdvertise("断开后恢复广播") }, 800)
+                }
                 if (newState == BluetoothGatt.STATE_CONNECTED && device != null && !isBonded) {
                     // 安全：连上但没配对，主动发起绑定；配对完成前不接收任何数据
                     Link.log("发起蓝牙配对（需要两端确认）…")
@@ -404,27 +453,60 @@ class BridgeService : Service() {
         Link.server = server
         Link.txChar = tx
 
-        val adv = adapter.bluetoothLeAdvertiser ?: return
-        val settings = AdvertiseSettings.Builder()
+        advertiser = adapter.bluetoothLeAdvertiser
+        advSettings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(true)
             .build()
-        val data = AdvertiseData.Builder()
+        advData = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(Link.serviceUUID))
             .setIncludeDeviceName(true)
             .build()
-        adv.startAdvertising(settings, data, object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                Link.log("蓝牙广播已开启")
-            }
+        startAdvertise("启动广播")
+    }
 
-            override fun onStartFailure(errorCode: Int) {
-                Link.log("蓝牙广播失败 code=$errorCode（多为缺少「附近的设备」权限或蓝牙被关）")
+    private var advertiser: BluetoothLeAdvertiser? = null
+    private var advSettings: AdvertiseSettings? = null
+    private var advData: AdvertiseData? = null
+    private var advRunning = false
+    private var advRetries = 0
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val advCallback = object : AdvertiseCallback() {
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            advRunning = true
+            advRetries = 0
+            Link.log("蓝牙广播已开启")
+        }
+
+        override fun onStartFailure(errorCode: Int) {
+            advRunning = false
+            Link.log("蓝牙广播失败 code=$errorCode（缺「附近的设备」权限、蓝牙被关，或已被系统停掉）")
+            // 广播起不来就等于隐身：退避重试，最多 5 次
+            if (advRetries < 5) {
+                advRetries += 1
+                handler.postDelayed({ startAdvertise("广播失败重试 #$advRetries") }, 2_000L * advRetries)
             }
-        })
+        }
+    }
+
+    /** 幂等：先停再起，断开/失败/被系统停掉后都能把广播拉回来 */
+    private fun startAdvertise(tag: String) {
+        val adv = advertiser ?: return
+        val settings = advSettings ?: return
+        val data = advData ?: return
+        try { if (advRunning) adv.stopAdvertising(advCallback) } catch (e: Exception) { }
+        advRunning = false
+        Link.log("$tag（重启广播）")
+        try {
+            adv.startAdvertising(settings, data, advCallback)
+        } catch (e: Exception) {
+            Link.log("广播启动异常：${e.message}")
+        }
     }
 
     override fun onDestroy() {
+        try { if (advRunning) advertiser?.stopAdvertising(advCallback) } catch (e: Exception) { }
         Link.server?.close()
         Link.server = null
         super.onDestroy()
